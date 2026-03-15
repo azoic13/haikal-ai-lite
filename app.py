@@ -1,168 +1,162 @@
-import streamlit as st
-import os
+# --- STEP 0: THE SQLITE FIX (MUST BE AT THE VERY TOP) ---
 import sys
-
-# --- STEP 1: SQLITE FIX ---
 try:
     __import__('pysqlite3')
     sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 except ImportError:
     pass 
 
+import streamlit as st
 import chromadb
 from chromadb.utils import embedding_functions
 from youtubesearchpython import VideosSearch
 from youtube_transcript_api import YouTubeTranscriptApi
 from google import genai
-from google.genai import types
-from langchain_community.document_loaders import PyPDFDirectoryLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from google.genai import types # Added for configuration
+from fpdf import FPDF
+import arabic_reshaper
+from bidi.algorithm import get_display
+import os
 
-# --- 2. INITIAL SETUP ---
-st.set_page_config(page_title="Haikal AI", page_icon="🕌", layout="wide")
+# --- 1. INITIAL SETUP ---
+st.set_page_config(page_title="Sharee'a AI", page_icon="🕌", layout="wide")
 
-if "GEMINI_API_KEY" not in st.secrets:
-    st.error("Please add 'GEMINI_API_KEY' to Streamlit Secrets.")
+# SECURITY FIX: Use secrets instead of hardcoding
+if "GEMINI_API_KEY" in st.secrets:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+else:
+    st.error("Please add GEMINI_API_KEY to your Streamlit Secrets.")
     st.stop()
 
-client_gemini = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+client_gemini = genai.Client(api_key=API_KEY)
 
+# Initialize Session State
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "current_sources" not in st.session_state:
-    st.session_state.current_sources = {"pdfs": [], "vids": []}
+if "current_pdfs" not in st.session_state:
+    st.session_state.current_pdfs = []
+if "current_vids" not in st.session_state:
+    st.session_state.current_vids = []
 
-# --- 3. DATABASE (REPAIRED INGESTION) ---
 embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="paraphrase-multilingual-MiniLM-L12-v2"
 )
 
-@st.cache_resource
-def load_and_ingest_db():
-    # Use a specific path for Streamlit persistence
-    persist_directory = "./chroma_db"
-    client_db = chromadb.PersistentClient(path=persist_directory)
-    collection = client_db.get_or_create_collection(
-        name="religious_knowledge", 
-        embedding_function=embedding_func
-    )
+# PERSISTENCE FIX: Ensure the path is reliable
+db_path = "./my_db"
+client_db = chromadb.PersistentClient(path=db_path)
+collection = client_db.get_or_create_collection(name="religious_knowledge", embedding_function=embedding_func)
 
-    # CHECK IF FILES EXIST
-    knowledge_path = "./knowledge"
-    if not os.path.exists(knowledge_path):
-        st.error(f"❌ Folder '{knowledge_path}' not found in GitHub!")
-        return collection
+# --- 2. CORE FUNCTIONS ---
 
-    pdf_files = [f for f in os.listdir(knowledge_path) if f.endswith('.pdf')]
-    st.sidebar.info(f"📁 Found {len(pdf_files)} PDFs in folder.")
+def fix_arabic_for_pdf(text):
+    if not text: return ""
+    reshaped_text = arabic_reshaper.reshape(text)
+    return get_display(reshaped_text)
 
-    if collection.count() == 0 and len(pdf_files) > 0:
-        with st.status("🛠️ Indexing library (First time only)..."):
-            # Try loading without recursive first if it fails
-            loader = PyPDFDirectoryLoader(knowledge_path)
-            docs = loader.load()
-            
-            if docs:
-                splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=800, 
-                    chunk_overlap=100,
-                    separators=["\n\n", "\n", "؟", ".", "،", " ", ""]
-                )
-                chunks = splitter.split_documents(docs)
-                
-                batch_size = 50 # Smaller batches for 1GB library
-                for i in range(0, len(chunks), batch_size):
-                    batch = chunks[i : i + batch_size]
-                    collection.add(
-                        ids=[f"id_{j}" for j in range(i, i + len(batch))],
-                        documents=[chunk.page_content for chunk in batch],
-                        metadatas=[chunk.metadata for chunk in batch]
-                    )
-                st.success(f"✅ Indexed {len(chunks)} text snippets!")
-            else:
-                st.warning("⚠️ Files found, but LangChain could not read them.")
-    
-    return collection
-
-collection = load_and_ingest_db()
-
-# --- 4. CORE UTILITIES ---
+def create_pdf(question, answer):
+    pdf = FPDF()
+    pdf.add_page()
+    # Check if font exists to prevent crash
+    if os.path.exists("arial.ttf"):
+        pdf.add_font("ArialAR", "", "arial.ttf")
+        pdf.set_font("ArialAR", size=12)
+    else:
+        pdf.set_font("Helvetica", size=12)
+    pdf.multi_cell(0, 10, txt=fix_arabic_for_pdf(f"السؤال: {question}"), align='R')
+    pdf.ln(5)
+    pdf.multi_cell(0, 10, txt=fix_arabic_for_pdf(f"الإجابة:\n{answer}"), align='R')
+    return pdf.output()
 
 def get_data(query, search_mode):
-    context, pdf_sources, yt_sources = "", [], []
-    
+    pdf_context, pdf_sources = "", []
+    yt_context, yt_sources = "", [] 
+    CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]
+
     if search_mode in ["Search Local Books Only", "Hybrid (Both)"]:
         try:
-            # INCREASE n_results to 7 for 1GB library
-            res = collection.query(query_texts=[query], n_results=7)
-            if res['documents'] and len(res['documents'][0]) > 0:
-                for d, m in zip(res['documents'][0], res['metadatas'][0]):
-                    s_name = os.path.basename(m.get('source', 'Unknown Book'))
-                    pdf_sources.append(s_name)
-                    context += f"\n[SOURCE: {s_name}]\n{d}\n"
-            else:
-                context += "\n(No relevant text found in local books for this specific query.)\n"
-        except Exception as e:
-            st.error(f"Search Error: {e}")
+            results = collection.query(query_texts=[query], n_results=3)
+            for d, m in zip(results['documents'][0], results['metadatas'][0]):
+                s_name = m.get('source', 'Unknown Book')
+                pdf_sources.append(s_name)
+                pdf_context += f"\n[BOOK SOURCE: {s_name}]\n{d}\n"
+        except Exception: pass
 
     if search_mode in ["Ask Mostafa Al-Adawi", "Hybrid (Both)"]:
-        try:
-            search = VideosSearch(f"{query} @ftawamostafaaladwy", limit=1)
-            for v in search.result().get('result', []):
-                try:
-                    t = YouTubeTranscriptApi.get_transcript(v['id'], languages=['ar', 'en'])
-                    yt_sources.append({"title": v['title'], "link": v['link']})
-                    context += f"\n[VIDEO: {v['title']}]\n{' '.join([x['text'] for x in t])[:1200]}\n"
-                except: continue
-        except: pass
+        for handle in CHANNELS:
+            try:
+                search = VideosSearch(f"{query} {handle}", limit=2)
+                res = search.result().get('result', [])
+                for v in res:
+                    try:
+                        t = YouTubeTranscriptApi.get_transcript(v['id'], languages=['ar', 'en'])
+                        v_title = str(v['title'])
+                        v_link = str(v['link'])
+                        yt_sources.append({"title": v_title, "link": v_link})
+                        yt_context += f"\n[VIDEO SOURCE: {v_title}]\nLink: {v_link}\nTranscript: {' '.join([x['text'] for x in t])[:2000]}\n"
+                    except: continue
+            except Exception: continue
                 
-    return context, pdf_sources, yt_sources
+    return pdf_context + yt_context, pdf_sources, yt_sources
 
-# --- 5. UI ---
-st.title("🕌 Haikal AI")
-
+# --- 3. SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.title("⚙️ Control Room")
     mode = st.radio("Search Mode:", ["Search Local Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
-    st.write(f"📊 DB Size: {collection.count()} chunks")
-    if st.button("🔄 Force Re-Index"):
-        # This is a 'Panic Button' to clear and restart
-        st.cache_resource.clear()
+    
+    if st.button("🗑️ Clear Chat History"):
+        st.session_state.messages = []
+        st.session_state.current_pdfs = []
+        st.session_state.current_vids = []
         st.rerun()
 
+    st.divider()
+    st.subheader("📍 Sources Consulted:")
+    if st.session_state.current_pdfs:
+        for p in set(st.session_state.current_pdfs):
+            st.write(f"📖 {p}")
+    if st.session_state.current_vids:
+        for v in st.session_state.current_vids:
+            st.markdown(f"🎥 [{v['title']}]({v['link']})")
+
+# --- 4. MAIN CHAT INTERFACE ---
+st.title("🕌 Sharee'a AI")
+
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]): st.markdown(msg["content"])
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
 if prompt := st.chat_input("Ask a question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"): st.markdown(prompt)
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        context, pdfs, vids = get_data(prompt, mode)
-        st.session_state.current_sources = {"pdfs": pdfs, "vids": vids}
-        
-        sys_instruct = (
-            "You are a scholarly assistant. Reply in the user's language. "
-            "Use the context below. If context is empty, say you couldn't find "
-            "specific details in the library but will answer from general knowledge."
-        )
-        
-        try:
-            # Use gemini-2.5-flash (Ensure this is in your region's quota)
-            response = client_gemini.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=f"Context:\n{context}\n\nQuestion: {prompt}",
-                config=types.GenerateContentConfig(system_instruction=sys_instruct)
-            )
-            answer = response.text
-        except:
-            answer = "I'm having trouble reaching the AI. Please try again in a moment."
-
-        st.markdown(answer)
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        st.rerun()
-
-with st.sidebar:
-    st.subheader("📚 Sources:")
-    for p in set(st.session_state.current_sources["pdfs"]): st.write(f"📖 {p}")
-    for v in st.session_state.current_sources["vids"]: st.markdown(f"🎥 [{v['title']}]({v['link']})")
+        with st.spinner("Searching sources..."):
+            context, pdfs, vids = get_data(prompt, mode)
+            st.session_state.current_pdfs = pdfs
+            st.session_state.current_vids = vids
+            
+            # Using 3.1-flash-lite for better free-tier availability in 2026
+            try:
+                response = client_gemini.models.generate_content(
+                    model="gemini-3.1-flash-lite-preview",
+                    contents=f"CONTEXT:\n{context}\n\nQ: {prompt}",
+                    config=types.GenerateContentConfig(
+                        system_instruction="You are an expert assistant for Sheikh Mostafa Al-Adawi. 1. Confidence Score. 2. Cite titles. 3. Match the user's language.",
+                        temperature=0.3
+                    )
+                )
+                answer_text = response.text
+            except Exception as e:
+                answer_text = f"I encountered an error: {str(e)}"
+            
+            st.markdown(answer_text)
+            st.session_state.messages.append({"role": "assistant", "content": answer_text})
+            
+            try:
+                pdf_bytes = create_pdf(prompt, answer_text)
+                st.download_button(label="📥 Save PDF", data=pdf_bytes, file_name="Report.pdf", mime="application/pdf")
+            except: pass
+            
+            st.rerun()
