@@ -19,7 +19,7 @@ from bidi.algorithm import get_display
 import os
 
 # --- 1. INITIAL SETUP ---
-st.set_page_config(page_title="Sharee'a AI", page_icon="🕌", layout="wide")
+st.set_page_config(page_title="Sharee'a AI (by Haikal)", page_icon="🕌", layout="wide")
 
 # SECURITY FIX: Use secrets instead of hardcoding
 if "GEMINI_API_KEY" in st.secrets:
