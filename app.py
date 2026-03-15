@@ -102,7 +102,7 @@ def get_data(query, search_mode):
 # --- 3. SIDEBAR ---
 with st.sidebar:
     st.title("⚙️ Control Room")
-    mode = st.radio("Search Mode:", ["Search Local Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
+    mode = st.radio("Search Mode:", ["Search Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
     
     if st.button("🗑️ Clear Chat History"):
         st.session_state.messages = []
@@ -120,7 +120,7 @@ with st.sidebar:
             st.markdown(f"🎥 [{v['title']}]({v['link']})")
 
 # --- 4. MAIN CHAT INTERFACE ---
-st.title("🕌 Sharee'a AI")
+st.title("🕌 Sharee'a AI (by Haikal)")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
