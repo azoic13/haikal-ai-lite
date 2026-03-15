@@ -2,12 +2,10 @@ streamlit
 chromadb
 google-genai
 langchain-community
-langchain-text-splitters
-pypdf
-sentence-transformers
 youtube-search-python
 youtube-transcript-api
 fpdf2
 arabic-reshaper
 python-bidi
+sentence-transformers
 pysqlite3-binary
