@@ -168,4 +168,5 @@ with streamlit_analytics.track(save_to_json="./analytics.json"):
 
     # --- 5. SECURE ANALYTICS PASSWORD ---
     # To view: your-url.streamlit.app/?analytics=on
-    streamlit_analytics.secure_password("haikal2026")
+ # --- UPDATE THE TOP OF YOUR SCRIPT TO THIS ---
+with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password="haikal2026"):
