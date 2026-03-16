@@ -1,4 +1,4 @@
-# --- STEP 0: THE SQLITE FIX (MUST BE AT THE VERY TOP) ---
+# --- STEP 0: THE SQLITE FIX ---
 import sys
 try:
     __import__('pysqlite3')
@@ -20,12 +20,10 @@ from bidi.algorithm import get_display
 import os
 
 # --- 1. INITIAL SETUP & ANALYTICS WRAPPER ---
-# Everything below this 'with' statement is indented by 4 spaces
 with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password="haikal2026"):
 
     st.set_page_config(page_title="Sharee'a (شريعة) AI", page_icon="🕌", layout="wide")
 
-    # SECURITY FIX: Use secrets instead of hardcoding
     if "GEMINI_API_KEY" in st.secrets:
         API_KEY = st.secrets["GEMINI_API_KEY"]
     else:
@@ -34,7 +32,6 @@ with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password=
 
     client_gemini = genai.Client(api_key=API_KEY)
 
-    # Initialize Session State
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "current_pdfs" not in st.session_state:
@@ -46,7 +43,6 @@ with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password=
         model_name="paraphrase-multilingual-MiniLM-L12-v2"
     )
 
-    # PERSISTENCE FIX
     db_path = "./my_db"
     client_db = chromadb.PersistentClient(path=db_path)
     collection = client_db.get_or_create_collection(name="religious_knowledge", embedding_function=embedding_func)
@@ -76,15 +72,19 @@ with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password=
         yt_context, yt_sources = "", [] 
         CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]
 
+        # SEARCH LOCAL BOOKS
         if search_mode in ["Search Books Only", "Hybrid (Both)"]:
             try:
-                results = collection.query(query_texts=[query], n_results=3)
-                for d, m in zip(results['documents'][0], results['metadatas'][0]):
-                    s_name = m.get('source', 'Unknown Book')
-                    pdf_sources.append(s_name)
-                    pdf_context += f"\n[BOOK SOURCE: {s_name}]\n{d}\n"
+                # Increased n_results to 6 for a broader search
+                results = collection.query(query_texts=[query], n_results=6)
+                if results['documents'] and len(results['documents'][0]) > 0:
+                    for d, m in zip(results['documents'][0], results['metadatas'][0]):
+                        s_name = m.get('source', 'Unknown Book')
+                        pdf_sources.append(s_name)
+                        pdf_context += f"\nSOURCE_FILE: {s_name}\nCONTENT: {d}\n"
             except Exception: pass
 
+        # SEARCH YOUTUBE
         if search_mode in ["Ask Mostafa Al-Adawi", "Hybrid (Both)"]:
             for handle in CHANNELS:
                 try:
@@ -96,17 +96,21 @@ with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password=
                             v_title = str(v['title'])
                             v_link = str(v['link'])
                             yt_sources.append({"title": v_title, "link": v_link})
-                            yt_context += f"\n[VIDEO SOURCE: {v_title}]\nLink: {v_link}\nTranscript: {' '.join([x['text'] for x in t])[:2000]}\n"
+                            yt_context += f"\nSOURCE_VIDEO: {v_title}\nTRANSCRIPT: {' '.join([x['text'] for x in t])[:1200]}\n"
                         except: continue
                 except Exception: continue
                     
-        return pdf_context + yt_context, pdf_sources, yt_sources
+        return pdf_context, yt_context, pdf_sources, yt_sources
 
     # --- 3. SIDEBAR ---
     with st.sidebar:
         st.title("⚙️ Control Room")
         mode = st.radio("Search Mode:", ["Search Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
         
+        # DEBUG STATUS
+        st.divider()
+        st.write(f"📊 Library Size: {collection.count()} chunks")
+
         if st.button("🗑️ Clear Chat History"):
             st.session_state.messages = []
             st.session_state.current_pdfs = []
@@ -121,9 +125,6 @@ with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password=
         if st.session_state.current_vids:
             for v in st.session_state.current_vids:
                 st.markdown(f"🎥 [{v['title']}]({v['link']})")
-        
-        st.divider()
-        st.caption("Admin: Add ?analytics=on to URL. Pass: haikal2026")
 
     # --- 4. MAIN CHAT INTERFACE ---
     st.title("🕌 Sharee'a AI (شريعة)")
@@ -138,30 +139,42 @@ with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password=
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching sources..."):
-                context, pdfs, vids = get_data(prompt, mode)
+            with st.spinner("Prioritizing files then checking videos..."):
+                pdf_ctx, yt_ctx, pdfs, vids = get_data(prompt, mode)
                 st.session_state.current_pdfs = pdfs
                 st.session_state.current_vids = vids
                 
+                # STICKER INSTRUCTIONS
+                instr = (
+                    "You are a scholarly assistant. Use the provided context to answer. "
+                    "Rule 1: If there is data in 'LOCAL FILES', you MUST start your answer with those findings and name the file. "
+                    "Rule 2: Then add views from 'YOUTUBE VIDEOS'. "
+                    "Rule 3: If different files or videos provide different answers, list every single one of them. DO NOT pick just one. "
+                    "Rule 4: If no information is found in either context, say you don't know based on the library."
+                )
+                
                 try:
+                    # Clearer separator for the AI
+                    combined_input = f"CONTEXT FROM LOCAL FILES:\n{pdf_ctx}\n\nCONTEXT FROM YOUTUBE VIDEOS:\n{yt_ctx}\n\nUSER QUESTION: {prompt}"
+                    
                     response = client_gemini.models.generate_content(
                         model="gemini-3.1-flash-lite-preview",
-                        contents=f"CONTEXT:\n{context}\n\nQ: {prompt}",
+                        contents=combined_input,
                         config=types.GenerateContentConfig(
-                            system_instruction="You are an expert assistant for Sheikh Mostafa Al-Adawi. 1. Confidence Score. 2. Cite titles. 3. Match the user's language.",
-                            temperature=0.3
+                            system_instruction=instr,
+                            temperature=0.2 # Lower temperature for higher accuracy
                         )
                     )
                     answer_text = response.text
                 except Exception as e:
-                    answer_text = f"I encountered an error: {str(e)}"
+                    answer_text = f"Error: {str(e)}"
                 
                 st.markdown(answer_text)
                 st.session_state.messages.append({"role": "assistant", "content": answer_text})
                 
                 try:
                     pdf_bytes = create_pdf(prompt, answer_text)
-                    st.download_button(label="📥 Save PDF", data=pdf_bytes, file_name="Report.pdf", mime="application/pdf")
+                    st.download_button(label="📥 Save PDF", data=pdf_bytes, file_name="Fatwa_Report.pdf", mime="application/pdf")
                 except: pass
                 
                 st.rerun()
