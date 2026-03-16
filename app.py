@@ -23,7 +23,7 @@ import os
 # Everything below this 'with' statement is indented by 4 spaces
 with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password="haikal2026"):
 
-    st.set_page_config(page_title="Sharee'a AI (by Haikal)", page_icon="🕌", layout="wide")
+    st.set_page_config(page_title="Sharee'a (شريعة) AI", page_icon="🕌", layout="wide")
 
     # SECURITY FIX: Use secrets instead of hardcoding
     if "GEMINI_API_KEY" in st.secrets:
