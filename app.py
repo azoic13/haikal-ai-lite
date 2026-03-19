@@ -76,7 +76,7 @@ with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password=
         yt_context, yt_sources = "", [] 
         CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]
 
-        if search_mode in ["Search Books Only", "Hybrid (Both)"]:
+        if search_mode in ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Hybrid (Both)"]:
             try:
                 results = collection.query(query_texts=[query], n_results=3)
                 for d, m in zip(results['documents'][0], results['metadatas'][0]):
@@ -105,7 +105,7 @@ with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password=
     # --- 3. SIDEBAR ---
     with st.sidebar:
         st.title("⚙️ Control Room")
-        mode = st.radio("Search Mode:", ["Search Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
+        mode = st.radio("Search Mode:", ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Mostafa Al-Adawi Youtube Channel", "Hybrid (Both)"], index=2)
         
         if st.button("🗑️ Clear Chat History"):
             st.session_state.messages = []
