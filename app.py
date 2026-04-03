@@ -1,4 +1,6 @@
-# --- STEP 0: THE SQLITE FIX (MUST BE AT THE VERY TOP) ---
+# =============================================================================
+# STEP 0 — SQLITE FIX (must be the very first thing that runs)
+# =============================================================================
 import sys
 try:
     __import__('pysqlite3')
@@ -10,215 +12,549 @@ import streamlit as st
 import streamlit_analytics2 as streamlit_analytics
 import chromadb
 from chromadb.utils import embedding_functions
-from youtubesearchpython import VideosSearch
+import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
+from groq import Groq
 from google import genai
 from google.genai import types
 from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
-import os
+import zipfile
+import pathlib
+import shutil
+import time
+import re
+import gdown
 
-# --- CONSTANTS ---
+# =============================================================================
+# STEP 1 — PATH RESOLUTION
+# All paths are relative to this file so the app works anywhere.
+# =============================================================================
+BASE_DIR  = pathlib.Path(__file__).parent.resolve()
+FONT_PATH = BASE_DIR / "arial.ttf"
+
+# =============================================================================
+# STEP 2 — DOWNLOAD & EXTRACT KNOWLEDGE BASE FROM GOOGLE DRIVE
+#
+# my_db.zip (110 MB) lives on Google Drive — too large for GitHub.
+# gdown handles Google's virus-scan confirmation page automatically.
+# Extracts into /tmp/my_db (always writable on Streamlit Cloud).
+# On every subsequent boot DB_FOLDER already exists → skipped instantly.
+# =============================================================================
+GDRIVE_FILE_ID = "11T6mhgRjwd7EFvs1VvkE7wUS3XJGUL0M"
+DB_FOLDER      = pathlib.Path("/tmp/my_db")
+DB_ZIP_PATH    = pathlib.Path("/tmp/my_db.zip")
+
+if not DB_FOLDER.exists():
+    with st.spinner("📥 Downloading knowledge base for the first time… (~30s)"):
+        try:
+            gdown.download(
+                f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}",
+                str(DB_ZIP_PATH),
+                quiet=False
+            )
+
+            # Inspect zip contents before extracting
+            with zipfile.ZipFile(DB_ZIP_PATH, "r") as zf:
+                names = zf.namelist()
+                zf.extractall("/tmp")
+
+            # Auto-detect extraction structure
+            # Case 1: my_db/chroma.sqlite3  ← correct
+            # Case 2: my_db/my_db/chroma.sqlite3  ← nested, needs fix
+            # Case 3: chroma.sqlite3 at root ← extracted flat into /tmp
+            sqlite_direct = DB_FOLDER / "chroma.sqlite3"
+            nested        = DB_FOLDER / "my_db"
+            flat_sqlite   = pathlib.Path("/tmp/chroma.sqlite3")
+
+            if sqlite_direct.exists():
+                pass  # perfect structure
+            elif nested.exists():
+                shutil.copytree(str(nested), str(DB_FOLDER), dirs_exist_ok=True)
+            elif flat_sqlite.exists():
+                DB_FOLDER.mkdir(parents=True, exist_ok=True)
+                shutil.copy(str(flat_sqlite), str(sqlite_direct))
+
+            DB_ZIP_PATH.unlink(missing_ok=True)
+
+            # Verify extraction worked
+            if (DB_FOLDER / "chroma.sqlite3").exists():
+                st.success("✅ Knowledge base downloaded and ready.")
+            else:
+                st.warning(
+                    f"⚠️ DB folder exists but chroma.sqlite3 not found. "
+                    f"Zip top-level entries: {names[:5]}"
+                )
+
+        except Exception as e:
+            st.error(f"❌ Failed to download knowledge base: {e}")
+            DB_FOLDER.mkdir(parents=True, exist_ok=True)
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
 MODE_BOOKS   = "Search Hadith Books (كتب الاحاديث و التفسير) Only"
 MODE_YOUTUBE = "Mostafa Al-Adawi Youtube Channel"
 MODE_HYBRID  = "Hybrid (Both)"
 
-# --- 1. INITIAL SETUP & ANALYTICS WRAPPER ---
-with streamlit_analytics.track(save_to_json="./analytics.json", unsafe_password="haikal2026"):
+# Both official Mostafa Al-Adawi channels
+ADAWI_CHANNELS = ["@mustafaaladawi", "@ftawamostafaaladwy"]
 
-    st.set_page_config(page_title="Sharee'a (شريعة) AI", page_icon="🕌", layout="wide")
+SYSTEM_PROMPT = """You are an expert Islamic knowledge assistant specialising in \
+the teachings of Sheikh Mostafa Al-Adawi.
 
-    # SECURITY: Use secrets instead of hardcoding
-    if "GEMINI_API_KEY" in st.secrets:
-        API_KEY = st.secrets["GEMINI_API_KEY"]
-    else:
-        st.error("Please add GEMINI_API_KEY to your Streamlit Secrets.")
+LANGUAGE RULE (CRITICAL):
+Reply in the EXACT same language as the user's question.
+Arabic question → full Arabic response.
+English question → full English response.
+Never mix languages. Never default to English.
+
+SOURCES RULE (CRITICAL — MOST IMPORTANT):
+You MUST answer ONLY using the information inside the CONTEXT block provided.
+NEVER use your own training knowledge to add hadiths, book names, or opinions.
+NEVER invent or hallucinate sources, page numbers, or scholar quotes.
+If the answer is NOT found in the provided context, reply ONLY with:
+  Arabic: "لم أجد إجابة لهذا السؤال في المصادر المتاحة."
+  English: "I could not find an answer to this question in the available sources."
+Then STOP. Do not supplement with outside knowledge under any circumstances.
+
+OUTPUT FORMAT (CRITICAL):
+Structure every response that has context exactly as follows:
+
+1. النص / The Text
+   Quote the EXACT wording from the context (hadith, Quran verse, or scholar \
+statement). Never quote text not explicitly in the context.
+
+2. الشرح / Explanation
+   Explain the meaning based solely on what the context says.
+
+3. المصادر / Sources
+   List ONLY sources that appear in the context, with:
+   - Book name, volume, and page number (if available)
+   - For videos: include the full YouTube link exactly as given in the context
+
+4. درجة الثقة / Confidence
+   Give a percentage and a brief reason. Use low confidence if context is thin."""
+
+# =============================================================================
+# MAIN APP
+# =============================================================================
+with streamlit_analytics.track(
+    save_to_json=str(BASE_DIR / "analytics.json"),
+    unsafe_password="haikal2026"
+):
+    st.set_page_config(
+        page_title="Sharee'a (شريعة) AI",
+        page_icon="🕌",
+        layout="wide"
+    )
+
+    # ── API key validation ────────────────────────────────────────────────────
+    has_groq   = "GROQ_API_KEY"      in st.secrets
+    has_gemini = "GEMINI_API_KEY_1"  in st.secrets
+    if not has_groq and not has_gemini:
+        st.error(
+            "No API keys found. Add at least one to Streamlit Secrets:\n"
+            "- `GROQ_API_KEY` — free at console.groq.com (recommended)\n"
+            "- `GEMINI_API_KEY_1` — fallback"
+        )
         st.stop()
 
-    client_gemini = genai.Client(api_key=API_KEY)
+    # ── Session state ─────────────────────────────────────────────────────────
+    for key, default in [("messages", []), ("current_pdfs", []), ("current_vids", [])]:
+        if key not in st.session_state:
+            st.session_state[key] = default
 
-    # Initialize Session State
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "current_pdfs" not in st.session_state:
-        st.session_state.current_pdfs = []
-    if "current_vids" not in st.session_state:
-        st.session_state.current_vids = []
-
+    # ── ChromaDB ──────────────────────────────────────────────────────────────
     embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="paraphrase-multilingual-MiniLM-L12-v2"
     )
-
-    # PERSISTENCE
-    db_path = "./my_db"
-    client_db = chromadb.PersistentClient(path=db_path)
+    client_db  = chromadb.PersistentClient(path=str(DB_FOLDER))
     collection = client_db.get_or_create_collection(
         name="religious_knowledge",
         embedding_function=embedding_func
     )
 
-    # --- 2. CORE FUNCTIONS ---
+    # ── YouTube transcript API instance (>= 0.6.0 instance-based) ────────────
+    ytt_api = YouTubeTranscriptApi()
 
-    def fix_arabic_for_pdf(text):
+    # =========================================================================
+    # FUNCTIONS
+    # =========================================================================
+
+    def fix_arabic_for_pdf(text: str) -> str:
         if not text:
             return ""
-        reshaped_text = arabic_reshaper.reshape(text)
-        return get_display(reshaped_text)
+        return get_display(arabic_reshaper.reshape(text))
 
-    def create_pdf(question, answer):
+    def create_pdf(question: str, answer: str) -> bytes:
         pdf = FPDF()
         pdf.add_page()
-        if os.path.exists("arial.ttf"):
-            pdf.add_font("ArialAR", "", "arial.ttf")
+        if FONT_PATH.exists():
+            pdf.add_font("ArialAR", "", str(FONT_PATH))
             pdf.set_font("ArialAR", size=12)
         else:
             pdf.set_font("Helvetica", size=12)
-        pdf.multi_cell(0, 10, txt=fix_arabic_for_pdf(f"السؤال: {question}"), align='R')
+        pdf.multi_cell(0, 10, txt=fix_arabic_for_pdf(f"السؤال: {question}"), align="R")
         pdf.ln(5)
-        pdf.multi_cell(0, 10, txt=fix_arabic_for_pdf(f"الإجابة:\n{answer}"), align='R')
+        pdf.multi_cell(0, 10, txt=fix_arabic_for_pdf(f"الإجابة:\n{answer}"), align="R")
         return pdf.output()
 
-    def get_data(query, search_mode):
-        """
-        Fetches context from ChromaDB (books) and/or YouTube transcripts
-        depending on the selected search mode.
-        """
-        pdf_context, pdf_sources = "", []
-        yt_context,  yt_sources  = "", []
-        CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]
+    # ── Book search ───────────────────────────────────────────────────────────
 
-        # ── Book search ──────────────────────────────────────────────────────
-        if search_mode in [MODE_BOOKS, MODE_HYBRID]:
-            try:
-                results = collection.query(query_texts=[query], n_results=3)
-                if results and results.get("documents"):
-                    for d, m in zip(results["documents"][0], results["metadatas"][0]):
-                        s_name = m.get("source", "Unknown Book")
-                        pdf_sources.append(s_name)
-                        pdf_context += f"\n[BOOK SOURCE: {s_name}]\n{d}\n"
-                if not pdf_context:
-                    st.warning("⚠️ No results found in the book database. Make sure books have been ingested.")
-            except Exception as e:
-                st.warning(f"⚠️ Book search error: {e}")
+    def normalize_arabic(text: str) -> str:
+        """
+        Normalize Arabic text before searching so that spelling
+        variations, diacritics, and different letter forms all match.
+        """
+        if not text:
+            return text
+        # Remove tashkeel (diacritics / harakat)
+        text = re.sub(r'[ً-ٰٟ]', '', text)
+        # Normalize alef variants → bare alef
+        text = re.sub(r'[أإآٱ]', 'ا', text)
+        # Normalize teh marbuta → heh
+        text = text.replace('ة', 'ه')
+        # Normalize alef maqsura → ya
+        text = text.replace('ى', 'ي')
+        # Normalize waw with hamza
+        text = text.replace('ؤ', 'و')
+        # Normalize ya with hamza
+        text = text.replace('ئ', 'ي')
+        # Collapse multiple spaces
+        text = re.sub(r' +', ' ', text).strip()
+        return text
 
-        # ── YouTube search ───────────────────────────────────────────────────
-        # FIX: mode string now matches the radio button label exactly
-        if search_mode in [MODE_YOUTUBE, MODE_HYBRID]:
-            found_any = False
-            for handle in CHANNELS:
+    def build_query_variants(query: str) -> list:
+        """
+        Build multiple search variants from the original query to maximise recall:
+        1. Original query as-is
+        2. Normalized Arabic (removes diacritics, unifies letter forms)
+        3. Core keywords (strips common question words in Arabic/English)
+        4. Normalized keywords (normalize the stripped version too)
+        """
+        normalized  = normalize_arabic(query)
+        # Strip leading question words
+        strip_pat   = r'^(ما|ما هو|ما هي|هل|كيف|متى|من|ما صحة|ما حكم|ما حكم|what is|is |how|when|who)\s+'
+        keywords    = re.sub(strip_pat, '', query,    flags=re.IGNORECASE).strip()
+        kw_norm     = re.sub(strip_pat, '', normalized, flags=re.IGNORECASE).strip()
+
+        # Deduplicate while preserving order
+        seen, variants = set(), []
+        for v in [query, normalized, keywords, kw_norm]:
+            if v and v not in seen:
+                seen.add(v)
+                variants.append(v)
+        return variants
+
+    def search_books(query: str) -> tuple[str, list]:
+        """
+        Multi-variant Arabic-normalized ChromaDB search.
+        Runs up to 4 query variants and merges results, giving broad coverage
+        even when the user's spelling differs from the indexed text.
+        """
+        context = ""
+        sources = []
+        try:
+            count = collection.count()
+            if count == 0:
+                st.warning("⚠️ Book database is empty.")
+                return "", []
+
+            variants = build_query_variants(query)
+            seen_docs = set()
+
+            for variant in variants:
                 try:
-                    search = VideosSearch(f"{query} {handle}", limit=2)
-                    res = search.result().get("result", [])
-                    for v in res:
-                        try:
-                            transcript = YouTubeTranscriptApi.get_transcript(
-                                v["id"], languages=["ar", "en"]
-                            )
-                            v_title = str(v["title"])
-                            v_link  = str(v["link"])
-                            yt_sources.append({"title": v_title, "link": v_link})
-                            transcript_text = " ".join([x["text"] for x in transcript])[:2000]
-                            yt_context += (
-                                f"\n[VIDEO SOURCE: {v_title}]\n"
-                                f"Link: {v_link}\n"
-                                f"Transcript: {transcript_text}\n"
-                            )
-                            found_any = True
-                        except Exception as e:
-                            st.warning(f"⚠️ Could not fetch transcript for '{v.get('title', 'unknown')}': {e}")
+                    results = collection.query(
+                        query_texts=[variant],
+                        n_results=10      # fetch more per variant for better recall
+                    )
+                    if not results.get("documents") or not results["documents"][0]:
+                        continue
+                    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+                        # Deduplicate by first 120 chars (handles minor whitespace diffs)
+                        key = doc[:120]
+                        if key in seen_docs:
                             continue
-                except Exception as e:
-                    st.warning(f"⚠️ YouTube search error for channel {handle}: {e}")
+                        seen_docs.add(key)
+                        source = meta.get("source", "Unknown Book")
+                        sources.append(source)
+                        context += f"\n[BOOK SOURCE: {source}]\n{doc}\n"
+                except Exception:
                     continue
 
-            if not found_any:
-                st.warning("⚠️ No YouTube transcripts could be retrieved.")
+            if not context:
+                st.info("ℹ️ No matching passages found in the book database for this query.")
 
-        return pdf_context + yt_context, pdf_sources, yt_sources
+        except Exception as e:
+            st.warning(f"⚠️ Book search error: {e}")
 
-    # --- 3. SIDEBAR ---
+        return context, sources
+
+    # ── YouTube search ────────────────────────────────────────────────────────
+
+    def search_channel_videos(query: str, channel_handle: str, limit: int = 5) -> list:
+        """
+        Search directly within an Al-Adawi channel page.
+        Using the channel search URL guarantees results are from that channel only.
+        """
+        url = f"https://www.youtube.com/{channel_handle}/search?query={query}"
+        ydl_opts = {
+            "quiet":          True,
+            "no_warnings":    True,
+            "extract_flat":   True,
+            "playlist_items": f"1-{limit}",
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return info.get("entries", []) or []
+        except Exception:
+            return []
+
+    def get_transcript(video_id: str) -> list:
+        """
+        Method 1: youtube-transcript-api (manual + known auto captions).
+        Method 2: yt-dlp (catches auto-generated Arabic captions method 1 misses).
+        """
+        # Method 1
+        try:
+            fetched = ytt_api.fetch(video_id, languages=["ar", "en"])
+            result  = [{"text": s.text} for s in fetched]
+            if result:
+                return result
+        except Exception:
+            pass
+
+        # Method 2: yt-dlp auto-subtitle extraction
+        ydl_opts = {
+            "quiet":           True,
+            "no_warnings":     True,
+            "writeautosub":    True,
+            "subtitleslangs":  ["ar", "en"],
+            "skip_download":   True,
+            "subtitlesformat": "vtt",
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(
+                    f"https://www.youtube.com/watch?v={video_id}",
+                    download=False
+                )
+                for caption_dict in [
+                    info.get("automatic_captions", {}),
+                    info.get("subtitles", {})
+                ]:
+                    for lang in ["ar", "en"]:
+                        for track in caption_dict.get(lang, []):
+                            raw = track.get("data", "")
+                            if raw:
+                                lines = [
+                                    l.strip() for l in raw.splitlines()
+                                    if l.strip()
+                                    and "-->" not in l
+                                    and not l.strip().startswith("WEBVTT")
+                                    and not l.strip().isdigit()
+                                ]
+                                if lines:
+                                    return [{"text": " ".join(lines)}]
+        except Exception:
+            pass
+
+        raise Exception("No transcript available.")
+
+    def search_youtube(query: str) -> tuple[str, list]:
+        """
+        Search both Al-Adawi channels, fetch transcripts, deduplicate by video ID.
+        Searches 5 videos per channel = up to 10 candidates total.
+        """
+        context = ""
+        sources = []
+        seen_ids = set()
+        found_any = False
+
+        for handle in ADAWI_CHANNELS:
+            videos = search_channel_videos(query, handle, limit=5)
+            for v in videos:
+                video_id = v.get("id") or v.get("url", "").split("=")[-1]
+                if not video_id or video_id in seen_ids:
+                    continue
+                seen_ids.add(video_id)
+
+                title = str(v.get("title", "Untitled"))
+                link  = f"https://www.youtube.com/watch?v={video_id}"
+
+                try:
+                    transcript      = get_transcript(video_id)
+                    transcript_text = " ".join(x["text"] for x in transcript)[:2500]
+                    sources.append({"title": title, "link": link})
+                    context += (
+                        f"\n[VIDEO SOURCE: {title}]\n"
+                        f"YouTube Link (must include in sources): {link}\n"
+                        f"Transcript: {transcript_text}\n"
+                    )
+                    found_any = True
+                except Exception:
+                    pass  # skip videos with no captions silently
+
+        if not found_any:
+            st.info("ℹ️ No video transcripts found for this query — answering from books only.")
+
+        return context, sources
+
+    # ── LLM calls ────────────────────────────────────────────────────────────
+
+    def call_groq(context: str, prompt: str) -> str:
+        client   = Groq(api_key=st.secrets["GROQ_API_KEY"])
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": f"CONTEXT:\n{context}\n\nQ: {prompt}"}
+            ],
+            temperature=0.2,
+            max_tokens=1500,
+        )
+        return response.choices[0].message.content
+
+    def call_gemini(api_key: str, context: str, prompt: str) -> str:
+        client   = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=f"CONTEXT:\n{context}\n\nQ: {prompt}",
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.2,
+            ),
+        )
+        return response.text
+
+    def call_llm(context: str, prompt: str) -> str:
+        """
+        Priority: Groq (free, fast, no daily cap) → Gemini key rotation (fallback).
+        Gemini keys are read from secrets as GEMINI_API_KEY_1, GEMINI_API_KEY_2, …
+        """
+        # 1. Groq
+        if "GROQ_API_KEY" in st.secrets:
+            try:
+                return call_groq(context, prompt)
+            except Exception as e:
+                st.warning(f"⚠️ Groq unavailable ({str(e)[:80]}…), trying Gemini…")
+
+        # 2. Gemini key rotation
+        gemini_keys = [
+            v for k, v in sorted(st.secrets.items())
+            if k.startswith("GEMINI_API_KEY")
+        ]
+        if not gemini_keys:
+            return "❌ No LLM available. Add GROQ_API_KEY to Streamlit Secrets."
+
+        for i, key in enumerate(gemini_keys, 1):
+            try:
+                return call_gemini(key, context, prompt)
+            except Exception as e:
+                err = str(e)
+                if "PerDay" in err or re.search(r'"limit"\s*:\s*0', err):
+                    st.warning(f"⚠️ Gemini key {i} daily quota exhausted, trying next…")
+                elif "429" in err:
+                    st.warning(f"⚠️ Gemini key {i} rate limited, trying next…")
+                    time.sleep(5)
+                else:
+                    return f"❌ Gemini error: {e}"
+
+        return (
+            "❌ All API keys exhausted.\n\n"
+            "- Add a free `GROQ_API_KEY` from console.groq.com\n"
+            "- Or wait until tomorrow for Gemini quota to reset"
+        )
+
+    # ── Main data fetch ───────────────────────────────────────────────────────
+
+    def get_data(query: str, search_mode: str) -> tuple[str, list, list]:
+        book_context, book_sources = "", []
+        yt_context,   yt_sources   = "", []
+
+        if search_mode in [MODE_BOOKS, MODE_HYBRID]:
+            book_context, book_sources = search_books(query)
+
+        if search_mode in [MODE_YOUTUBE, MODE_HYBRID]:
+            yt_context, yt_sources = search_youtube(query)
+
+        return book_context + yt_context, book_sources, yt_sources
+
+    # =========================================================================
+    # SIDEBAR
+    # =========================================================================
     with st.sidebar:
         st.title("⚙️ Control Room")
 
-        # All three strings here are now the single source of truth (use constants)
         mode = st.radio(
             "Search Mode:",
             [MODE_BOOKS, MODE_YOUTUBE, MODE_HYBRID],
             index=2
         )
 
+        # Live DB stats
+        try:
+            doc_count = collection.count()
+            if doc_count > 0:
+                st.success(f"📚 {doc_count:,} passages indexed")
+            else:
+                st.warning("📚 Book DB is empty")
+        except Exception:
+            pass
+
         if st.button("🗑️ Clear Chat History"):
-            st.session_state.messages    = []
+            st.session_state.messages     = []
             st.session_state.current_pdfs = []
             st.session_state.current_vids = []
             st.rerun()
 
         st.divider()
         st.subheader("📍 Sources Consulted:")
-        if st.session_state.current_pdfs:
-            for p in set(st.session_state.current_pdfs):
-                st.write(f"📖 {p}")
-        if st.session_state.current_vids:
-            for v in st.session_state.current_vids:
-                st.markdown(f"🎥 [{v['title']}]({v['link']})")
+        for p in set(st.session_state.current_pdfs):
+            st.write(f"📖 {p}")
+        for v in st.session_state.current_vids:
+            st.markdown(f"🎥 [{v['title']}]({v['link']})")
 
         st.divider()
         st.caption("Admin: Add ?analytics=on to URL. Pass: haikal2026")
 
-    # --- 4. MAIN CHAT INTERFACE ---
+    # =========================================================================
+    # MAIN CHAT INTERFACE
+    # =========================================================================
     st.title("🕌 Sharee'a AI (شريعة)")
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Ask a question..."):
+    if prompt := st.chat_input("Ask a question... / اسأل سؤالاً..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching sources..."):
+            with st.spinner("🔍 Searching sources..."):
                 context, pdfs, vids = get_data(prompt, mode)
                 st.session_state.current_pdfs = pdfs
                 st.session_state.current_vids = vids
 
-                try:
-                    response = client_gemini.models.generate_content(
-                        # FIX: use a real, available Gemini model name
-                        model="gemini-2.0-flash",
-                        contents=f"CONTEXT:\n{context}\n\nQ: {prompt}",
-                        config=types.GenerateContentConfig(
-                            system_instruction=(
-                                "You are an expert Islamic knowledge assistant specialising in "
-                                "the teachings of Sheikh Mostafa Al-Adawi. "
-                                "Always: 1) Provide a confidence score (e.g. Confidence: 85%). "
-                                "2) Cite the source titles you used. "
-                                "3) Reply in the same language the user used."
-                            ),
-                            temperature=0.3
-                        )
-                    )
-                    answer_text = response.text
-                except Exception as e:
-                    answer_text = f"❌ Gemini API error: {str(e)}"
+            with st.spinner("💬 Generating answer..."):
+                answer_text = call_llm(context, prompt)
 
-                st.markdown(answer_text)
-                st.session_state.messages.append({"role": "assistant", "content": answer_text})
+            st.markdown(answer_text)
+            st.session_state.messages.append({"role": "assistant", "content": answer_text})
 
-                # PDF download — fail silently but log to console
-                try:
-                    pdf_bytes = create_pdf(prompt, answer_text)
-                    st.download_button(
-                        label="📥 Save as PDF",
-                        data=pdf_bytes,
-                        file_name="Sharee'a_Report.pdf",
-                        mime="application/pdf"
-                    )
-                except Exception as e:
-                    print(f"PDF generation error: {e}")
-
-                # FIX: removed st.rerun() — Streamlit reruns automatically after
-                # chat input; calling it manually here caused UI flicker and
-                # could interrupt the assistant message render.
+            try:
+                pdf_bytes = create_pdf(prompt, answer_text)
+                st.download_button(
+                    label="📥 Save as PDF",
+                    data=pdf_bytes,
+                    file_name="Sharee'a_Report.pdf",
+                    mime="application/pdf",
+                )
+            except Exception as e:
+                print(f"PDF error: {e}")
