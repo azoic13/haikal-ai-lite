@@ -217,79 +217,125 @@ with streamlit_analytics.track(
 
     # ── Book search ───────────────────────────────────────────────────────────
 
+    # Transliteration map: English/Latin Islamic terms → Arabic
+    TRANSLIT_MAP = {
+        "zakat al fitr":"زكاه الفطر","zakat el fitr":"زكاه الفطر",
+        "zakat alfitr":"زكاه الفطر","zakatul fitr":"زكاه الفطر",
+        "zakat al-fitr":"زكاه الفطر","zakat":"زكاه","zakah":"زكاه",
+        "fitr":"فطر","fitir":"فطر","salah":"صلاه","salat":"صلاه",
+        "prayer":"صلاه","sawm":"صوم","siyam":"صيام","fasting":"صوم",
+        "ramadan":"رمضان","ramadhan":"رمضان","hajj":"حج","haj":"حج",
+        "hadith":"حديث","hadeeth":"حديث","sahih":"صحيح","saheeh":"صحيح",
+        "sunnah":"سنه","sunna":"سنه","quran":"قرآن","koran":"قرآن",
+        "tafsir":"تفسير","fiqh":"فقه","fatwa":"فتوى","fatwah":"فتوى",
+        "halal":"حلال","haram":"حرام","sadaqah":"صدقه","sadaqa":"صدقه",
+        "wudu":"وضوء","wudhu":"وضوء","ablution":"وضوء","jihad":"جهاد",
+        "nikah":"نكاح","marriage":"زواج","divorce":"طلاق","talaq":"طلاق",
+        "aqeedah":"عقيده","aqidah":"عقيده","creed":"عقيده",
+        "tawhid":"توحيد","tawheed":"توحيد","shirk":"شرك",
+        "bidah":"بدعه","bid'ah":"بدعه","tawbah":"توبه","repentance":"توبه",
+        "dua":"دعاء","du'a":"دعاء","supplication":"دعاء",
+        "dhikr":"ذكر","zikr":"ذكر","jannah":"جنه","paradise":"جنه",
+        "jahannam":"جهنم","hell":"جهنم","iman":"إيمان","faith":"إيمان",
+        "prophet":"نبي","nabi":"نبي","messenger":"رسول","rasool":"رسول",
+        "companion":"صحابي","sahabi":"صحابي","sahaba":"صحابه",
+        "ibn":"ابن","abu":"أبو","bint":"بنت",
+        "sa":"صاع","sa'":"صاع","mudd":"مد","shahada":"شهاده",
+    }
+
+    def transliterate_to_arabic(text: str) -> str:
+        lower = text.lower().strip()
+        if lower in TRANSLIT_MAP:
+            return TRANSLIT_MAP[lower]
+        words, result, i = lower.split(), [], 0
+        while i < len(words):
+            if i + 1 < len(words):
+                two = words[i] + " " + words[i+1]
+                if two in TRANSLIT_MAP:
+                    result.append(TRANSLIT_MAP[two])
+                    i += 2
+                    continue
+            result.append(TRANSLIT_MAP.get(words[i], words[i]))
+            i += 1
+        return " ".join(result)
+
+    def is_transliteration(text: str) -> bool:
+        latin  = sum(1 for c in text if c.isascii() and c.isalpha())
+        arabic = sum(1 for c in text if "؀" <= c <= "ۿ")
+        return latin > arabic
+
     def normalize_arabic(text: str) -> str:
-        """
-        Normalize Arabic text before searching so that spelling
-        variations, diacritics, and different letter forms all match.
-        """
         if not text:
             return text
-        # Remove tashkeel (diacritics / harakat)
-        text = re.sub(r'[ً-ٰٟ]', '', text)
-        # Normalize alef variants → bare alef
-        text = re.sub(r'[أإآٱ]', 'ا', text)
-        # Normalize teh marbuta → heh
-        text = text.replace('ة', 'ه')
-        # Normalize alef maqsura → ya
-        text = text.replace('ى', 'ي')
-        # Normalize waw with hamza
-        text = text.replace('ؤ', 'و')
-        # Normalize ya with hamza
-        text = text.replace('ئ', 'ي')
-        # Collapse multiple spaces
-        text = re.sub(r' +', ' ', text).strip()
-        return text
+        text = re.sub(r"[ً-ٰٟ]", "", text)
+        text = re.sub(r"[أإآٱ]", "ا", text)
+        text = text.replace("ة","ه").replace("ى","ي").replace("ؤ","و").replace("ئ","ي")
+        return re.sub(r" +", " ", text).strip()
 
     def build_query_variants(query: str) -> list:
         """
-        Build multiple search variants from the original query to maximise recall:
-        1. Original query as-is
-        2. Normalized Arabic (removes diacritics, unifies letter forms)
-        3. Core keywords (strips common question words in Arabic/English)
-        4. Normalized keywords (normalize the stripped version too)
+        Build up to 12 search variants covering:
+        - Transliteration → Arabic conversion
+        - Normalization (diacritics, letter forms)
+        - Question word stripping
+        - Individual keywords
+        - Root approximations
         """
-        normalized  = normalize_arabic(query)
-        # Strip leading question words
-        strip_pat   = r'^(ما|ما هو|ما هي|هل|كيف|متى|من|ما صحة|ما حكم|ما حكم|what is|is |how|when|who)\s+'
-        keywords    = re.sub(strip_pat, '', query,    flags=re.IGNORECASE).strip()
-        kw_norm     = re.sub(strip_pat, '', normalized, flags=re.IGNORECASE).strip()
+        strip_pat = (
+            r"^(ما هو|ما هي|ما صحة|ما حكم|ما معنى|هل يجوز|هل صح|هل ورد|"
+            r"ما|هل|كيف|متى|من|حكم|صحة|معنى|تفسير|شرح|"
+            r"what is the ruling on|what is|is it|how|when|who|"
+            r"ruling on|meaning of|tell me about|explain)\s+"
+        )
 
-        # Deduplicate while preserving order
+        translit = transliterate_to_arabic(query) if is_transliteration(query) else ""
+        norm     = normalize_arabic(query)
+        stripped = re.sub(strip_pat, "", query,    flags=re.IGNORECASE).strip()
+        str_norm = normalize_arabic(stripped)
+        tr_strip = re.sub(strip_pat, "", translit, flags=re.IGNORECASE).strip() if translit else ""
+        tr_norm  = normalize_arabic(tr_strip) if tr_strip else ""
+
+        # Individual Arabic keywords (3+ chars)
+        ar_words = [w for w in (tr_norm or str_norm).split() if len(w) >= 3]
+        # Root approximation
+        roots    = list({w[:-2] for w in ar_words if len(w) >= 6})[:4]
+
+        candidates = [
+            query, translit, tr_strip, tr_norm,
+            norm, stripped, str_norm,
+            " ".join(ar_words[:5]),
+        ] + ar_words[:4] + roots
+
         seen, variants = set(), []
-        for v in [query, normalized, keywords, kw_norm]:
-            if v and v not in seen:
+        for v in candidates:
+            v = v.strip()
+            if v and v not in seen and len(v) >= 2:
                 seen.add(v)
                 variants.append(v)
         return variants
 
     def search_books(query: str) -> tuple[str, list]:
-        """
-        Multi-variant Arabic-normalized ChromaDB search.
-        Runs up to 4 query variants and merges results, giving broad coverage
-        even when the user's spelling differs from the indexed text.
-        """
-        context = ""
-        sources = []
+        context, sources = "", []
         try:
-            count = collection.count()
-            if count == 0:
+            if collection.count() == 0:
                 st.warning("⚠️ Book database is empty.")
                 return "", []
 
-            variants = build_query_variants(query)
+            variants  = build_query_variants(query)
             seen_docs = set()
+            MAX_DOCS  = 20
 
             for variant in variants:
+                if len(seen_docs) >= MAX_DOCS:
+                    break
                 try:
-                    results = collection.query(
-                        query_texts=[variant],
-                        n_results=10      # fetch more per variant for better recall
-                    )
+                    results = collection.query(query_texts=[variant], n_results=10)
                     if not results.get("documents") or not results["documents"][0]:
                         continue
                     for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-                        # Deduplicate by first 120 chars (handles minor whitespace diffs)
-                        key = doc[:120]
+                        if len(seen_docs) >= MAX_DOCS:
+                            break
+                        key = doc[:150]
                         if key in seen_docs:
                             continue
                         seen_docs.add(key)
@@ -300,14 +346,16 @@ with streamlit_analytics.track(
                     continue
 
             if not context:
-                st.info("ℹ️ No matching passages found in the book database for this query.")
+                st.info("ℹ️ No matching passages found in the book database.")
+            else:
+                st.caption(f"📖 {len(seen_docs)} passages from {len(set(sources))} book(s)")
 
         except Exception as e:
             st.warning(f"⚠️ Book search error: {e}")
 
         return context, sources
 
-    # ── YouTube search ────────────────────────────────────────────────────────
+        # ── YouTube search ────────────────────────────────────────────────────────
 
     def search_channel_videos(query: str, channel_handle: str, limit: int = 5) -> list:
         """
