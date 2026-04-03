@@ -233,14 +233,13 @@ with streamlit_analytics.track(
         "nikah":"نكاح","marriage":"زواج","divorce":"طلاق","talaq":"طلاق",
         "aqeedah":"عقيده","aqidah":"عقيده","creed":"عقيده",
         "tawhid":"توحيد","tawheed":"توحيد","shirk":"شرك",
-        "bidah":"بدعه","bid'ah":"بدعه","tawbah":"توبه","repentance":"توبه",
-        "dua":"دعاء","du'a":"دعاء","supplication":"دعاء",
-        "dhikr":"ذكر","zikr":"ذكر","jannah":"جنه","paradise":"جنه",
-        "jahannam":"جهنم","hell":"جهنم","iman":"إيمان","faith":"إيمان",
-        "prophet":"نبي","nabi":"نبي","messenger":"رسول","rasool":"رسول",
-        "companion":"صحابي","sahabi":"صحابي","sahaba":"صحابه",
-        "ibn":"ابن","abu":"أبو","bint":"بنت",
-        "sa":"صاع","sa'":"صاع","mudd":"مد","shahada":"شهاده",
+        "bidah":"بدعه","bid3ah":"بدعه","tawbah":"توبه","repentance":"توبه",
+        "dua":"دعاء","supplication":"دعاء","dhikr":"ذكر","zikr":"ذكر",
+        "jannah":"جنه","paradise":"جنه","jahannam":"جهنم","hell":"جهنم",
+        "iman":"إيمان","faith":"إيمان","prophet":"نبي","nabi":"نبي",
+        "messenger":"رسول","rasool":"رسول","companion":"صحابي",
+        "sahabi":"صحابي","sahaba":"صحابه","ibn":"ابن","abu":"أبو",
+        "sa":"صاع","mudd":"مد","shahada":"شهاده",
     }
 
     def transliterate_to_arabic(text: str) -> str:
@@ -261,50 +260,62 @@ with streamlit_analytics.track(
 
     def is_transliteration(text: str) -> bool:
         latin  = sum(1 for c in text if c.isascii() and c.isalpha())
-        arabic = sum(1 for c in text if "؀" <= c <= "ۿ")
+        arabic = sum(1 for c in text if "\u0600" <= c <= "\u06ff")
         return latin > arabic
 
     def normalize_arabic(text: str) -> str:
+        """Normalize Arabic — MUST match ingest.py exactly."""
         if not text:
             return text
-        text = re.sub(r"[ً-ٰٟ]", "", text)
+        text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
         text = re.sub(r"[أإآٱ]", "ا", text)
-        text = text.replace("ة","ه").replace("ى","ي").replace("ؤ","و").replace("ئ","ي")
+        text = text.replace("ة","ه").replace("ى","ي")
+        text = text.replace("ؤ","و").replace("ئ","ي")
         return re.sub(r" +", " ", text).strip()
+
+    def get_arabic_keywords(text: str) -> list:
+        """Extract meaningful Arabic keywords (4+ chars, skip stopwords)."""
+        STOPWORDS = {
+            "من","في","على","إلى","عن","هذا","هذه","ذلك","التي","الذي",
+            "وهو","وهي","كان","كانت","يكون","قال","قالت","أن","إن","لا",
+            "ما","هل","كيف","متى","وما","فما","ولا","وإن","فإن","عند",
+            "بعد","قبل","حتى","بين","منه","منها","عنه","عنها","له","لها",
+        }
+        words = re.findall(r"[؀-ۿ]{4,}", text)
+        return [w for w in words if w not in STOPWORDS]
 
     def build_query_variants(query: str) -> list:
         """
-        Build up to 12 search variants covering:
-        - Transliteration → Arabic conversion
-        - Normalization (diacritics, letter forms)
-        - Question word stripping
-        - Individual keywords
-        - Root approximations
+        Build all search variants:
+        1. Transliteration → Arabic
+        2. Normalization
+        3. Question word stripping
+        4. Individual keywords
+        5. Root approximations
         """
         strip_pat = (
             r"^(ما هو|ما هي|ما صحة|ما حكم|ما معنى|هل يجوز|هل صح|هل ورد|"
             r"ما|هل|كيف|متى|من|حكم|صحة|معنى|تفسير|شرح|"
-            r"what is the ruling on|what is|is it|how|when|who|"
-            r"ruling on|meaning of|tell me about|explain)\s+"
+            r"what is the ruling on|what is|is it|how to|how|when|who|"
+            r"ruling on|meaning of|tell me about|explain|what are)\s+"
         )
+        translit  = transliterate_to_arabic(query) if is_transliteration(query) else ""
+        norm      = normalize_arabic(query)
+        stripped  = re.sub(strip_pat, "", query,    flags=re.IGNORECASE).strip()
+        str_norm  = normalize_arabic(stripped)
+        tr_strip  = re.sub(strip_pat, "", translit, flags=re.IGNORECASE).strip() if translit else ""
+        tr_norm   = normalize_arabic(tr_strip) if tr_strip else ""
 
-        translit = transliterate_to_arabic(query) if is_transliteration(query) else ""
-        norm     = normalize_arabic(query)
-        stripped = re.sub(strip_pat, "", query,    flags=re.IGNORECASE).strip()
-        str_norm = normalize_arabic(stripped)
-        tr_strip = re.sub(strip_pat, "", translit, flags=re.IGNORECASE).strip() if translit else ""
-        tr_norm  = normalize_arabic(tr_strip) if tr_strip else ""
-
-        # Individual Arabic keywords (3+ chars)
-        ar_words = [w for w in (tr_norm or str_norm).split() if len(w) >= 3]
-        # Root approximation
-        roots    = list({w[:-2] for w in ar_words if len(w) >= 6})[:4]
+        # Use the most Arabic-rich form as the base for keyword extraction
+        best_arabic = tr_norm or str_norm or norm
+        keywords    = get_arabic_keywords(best_arabic)
+        roots       = list({w[:-2] for w in keywords if len(w) >= 6})[:5]
 
         candidates = [
             query, translit, tr_strip, tr_norm,
             norm, stripped, str_norm,
-            " ".join(ar_words[:5]),
-        ] + ar_words[:4] + roots
+            " ".join(keywords[:6]),
+        ] + keywords[:6] + roots
 
         seen, variants = set(), []
         for v in candidates:
@@ -314,41 +325,122 @@ with streamlit_analytics.track(
                 variants.append(v)
         return variants
 
+    def keyword_search(keywords: list, max_results: int = 30) -> list:
+        """
+        ChromaDB WHERE_DOCUMENT keyword search — finds documents that
+        literally CONTAIN the keyword string. This catches cases where
+        semantic search misses due to OCR noise or embedding gaps.
+        Returns list of (doc, source) tuples.
+        """
+        hits = []
+        seen = set()
+        for kw in keywords:
+            if len(kw) < 3:
+                continue
+            try:
+                res = collection.get(
+                    where_document={"$contains": kw},
+                    limit=max_results,
+                    include=["documents", "metadatas"]
+                )
+                if not res or not res.get("documents"):
+                    continue
+                for doc, meta in zip(res["documents"], res["metadatas"]):
+                    key = doc[:150]
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    hits.append((doc, meta.get("source", "Unknown Book")))
+            except Exception:
+                continue
+        return hits
+
+    def semantic_search(variants: list, n_per_variant: int = 15) -> list:
+        """
+        ChromaDB embedding/semantic search across all query variants.
+        Returns list of (doc, source) tuples.
+        """
+        hits = []
+        seen = set()
+        for variant in variants:
+            try:
+                res = collection.query(
+                    query_texts=[variant],
+                    n_results=n_per_variant
+                )
+                if not res.get("documents") or not res["documents"][0]:
+                    continue
+                for doc, meta in zip(res["documents"][0], res["metadatas"][0]):
+                    key = doc[:150]
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    hits.append((doc, meta.get("source", "Unknown Book")))
+            except Exception:
+                continue
+        return hits
+
     def search_books(query: str) -> tuple[str, list]:
+        """
+        HYBRID SEARCH: combines two independent strategies then merges results.
+
+        1. SEMANTIC search — embedding similarity across all query variants
+           Good at: finding conceptually related passages even with different wording
+           Weak at: exact term matching, OCR-noisy text
+
+        2. KEYWORD search — literal substring matching via ChromaDB where_document
+           Good at: exact term matching regardless of context
+           Weak at: synonyms or conceptual similarity
+
+        Results from both are merged and deduplicated, capped at 25 passages.
+        Keyword hits are prioritized (they contain the exact term).
+        """
         context, sources = "", []
+
         try:
             if collection.count() == 0:
                 st.warning("⚠️ Book database is empty.")
                 return "", []
 
-            variants  = build_query_variants(query)
-            seen_docs = set()
-            MAX_DOCS  = 20
+            variants = build_query_variants(query)
 
-            for variant in variants:
+            # Best Arabic form for keyword extraction
+            translit     = transliterate_to_arabic(query) if is_transliteration(query) else ""
+            best_arabic  = normalize_arabic(translit or query)
+            stripped     = re.sub(
+                r"^(ما هو|ما هي|ما صحة|ما حكم|ما|هل|كيف|what is|ruling on|tell me about)\s+",
+                "", best_arabic, flags=re.IGNORECASE
+            ).strip()
+            keywords     = get_arabic_keywords(stripped or best_arabic)
+
+            # Run both searches in parallel strategy
+            kw_hits  = keyword_search(keywords, max_results=20)
+            sem_hits = semantic_search(variants, n_per_variant=15)
+
+            # Merge: keyword hits first (exact match priority), then semantic
+            seen_docs = set()
+            MAX_DOCS  = 25
+            all_hits  = kw_hits + sem_hits   # keyword hits get priority
+
+            for doc, source in all_hits:
                 if len(seen_docs) >= MAX_DOCS:
                     break
-                try:
-                    results = collection.query(query_texts=[variant], n_results=10)
-                    if not results.get("documents") or not results["documents"][0]:
-                        continue
-                    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-                        if len(seen_docs) >= MAX_DOCS:
-                            break
-                        key = doc[:150]
-                        if key in seen_docs:
-                            continue
-                        seen_docs.add(key)
-                        source = meta.get("source", "Unknown Book")
-                        sources.append(source)
-                        context += f"\n[BOOK SOURCE: {source}]\n{doc}\n"
-                except Exception:
+                key = doc[:150]
+                if key in seen_docs:
                     continue
+                seen_docs.add(key)
+                sources.append(source)
+                context += f"\n[BOOK SOURCE: {source}]\n{doc}\n"
 
             if not context:
                 st.info("ℹ️ No matching passages found in the book database.")
             else:
-                st.caption(f"📖 {len(seen_docs)} passages from {len(set(sources))} book(s)")
+                kw_count  = min(len(kw_hits),  MAX_DOCS)
+                sem_count = min(len(sem_hits),  MAX_DOCS - kw_count)
+                st.caption(
+                    f"📖 {len(seen_docs)} passages from {len(set(sources))} book(s) "
+                    f"(keyword: {len(kw_hits)} | semantic: {len(sem_hits)})"
+                )
 
         except Exception as e:
             st.warning(f"⚠️ Book search error: {e}")
