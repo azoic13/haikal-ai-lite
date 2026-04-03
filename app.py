@@ -587,23 +587,15 @@ with streamlit_analytics.track(
 
     def call_llm(context: str, prompt: str) -> str:
         """
-        Priority: Groq (free, fast, no daily cap) → Gemini key rotation (fallback).
-        Gemini keys are read from secrets as GEMINI_API_KEY_1, GEMINI_API_KEY_2, …
+        Priority: Gemini (primary) → Groq (fallback).
+        Gemini keys rotated automatically: GEMINI_API_KEY_1, GEMINI_API_KEY_2, …
+        Groq used as fallback if all Gemini keys are exhausted.
         """
-        # 1. Groq
-        if "GROQ_API_KEY" in st.secrets:
-            try:
-                return call_groq(context, prompt)
-            except Exception as e:
-                st.warning(f"⚠️ Groq unavailable ({str(e)[:80]}…), trying Gemini…")
-
-        # 2. Gemini key rotation
+        # 1. Gemini key rotation (primary)
         gemini_keys = [
             v for k, v in sorted(st.secrets.items())
             if k.startswith("GEMINI_API_KEY")
         ]
-        if not gemini_keys:
-            return "❌ No LLM available. Add GROQ_API_KEY to Streamlit Secrets."
 
         for i, key in enumerate(gemini_keys, 1):
             try:
@@ -613,15 +605,29 @@ with streamlit_analytics.track(
                 if "PerDay" in err or re.search(r'"limit"\s*:\s*0', err):
                     st.warning(f"⚠️ Gemini key {i} daily quota exhausted, trying next…")
                 elif "429" in err:
-                    st.warning(f"⚠️ Gemini key {i} rate limited, trying next…")
-                    time.sleep(5)
+                    # Parse retry delay from error if available
+                    match = re.search(r"retry.*?(\d+)s", err, re.IGNORECASE)
+                    wait  = int(match.group(1)) if match else 10
+                    wait  = min(wait, 30)   # cap at 30s
+                    st.warning(f"⚠️ Gemini key {i} rate limited, waiting {wait}s…")
+                    time.sleep(wait)
                 else:
                     return f"❌ Gemini error: {e}"
 
+        # 2. Groq fallback
+        if "GROQ_API_KEY" in st.secrets:
+            try:
+                st.info("ℹ️ All Gemini keys exhausted — using Groq fallback…")
+                return call_groq(context, prompt)
+            except Exception as e:
+                return f"❌ Groq fallback error: {e}"
+
         return (
             "❌ All API keys exhausted.\n\n"
-            "- Add a free `GROQ_API_KEY` from console.groq.com\n"
-            "- Or wait until tomorrow for Gemini quota to reset"
+            "- ⏰ Gemini quota resets daily\n"
+            "- 💳 Add billing to Google AI Studio for higher limits\n"
+            "- 🔑 Add more keys: GEMINI_API_KEY_2, GEMINI_API_KEY_3…\n"
+            "- ✅ Add GROQ_API_KEY from console.groq.com as fallback"
         )
 
     # ── Main data fetch ───────────────────────────────────────────────────────
