@@ -1,0 +1,12 @@
+streamlit
+chromadb
+google-genai
+langchain-community
+youtube-search-python
+youtube-transcript-api
+fpdf2
+arabic-reshaper
+python-bidi
+sentence-transformers
+pysqlite3-binary
+streamlit-analytics2
