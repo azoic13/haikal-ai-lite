@@ -4,6 +4,7 @@ chromadb
 sentence-transformers
 yt-dlp
 youtube-transcript-api
+anthropic
 groq
 google-genai
 fpdf2
