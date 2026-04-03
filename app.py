@@ -170,11 +170,25 @@ with streamlit_analytics.track(
     embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="paraphrase-multilingual-MiniLM-L12-v2"
     )
-    client_db  = chromadb.PersistentClient(path=str(DB_FOLDER))
+    client_db = chromadb.PersistentClient(path=str(DB_FOLDER))
+
+    # Diagnostic: show all collections in the DB
+    existing_collections = [c.name for c in client_db.list_collections()]
+
+    # Use the first available collection if "religious_knowledge" not found
+    COLLECTION_NAME = "religious_knowledge"
+    if existing_collections and COLLECTION_NAME not in existing_collections:
+        COLLECTION_NAME = existing_collections[0]
+        st.info(f"ℹ️ Using collection: '{COLLECTION_NAME}' (found: {existing_collections})")
+
     collection = client_db.get_or_create_collection(
-        name="religious_knowledge",
+        name=COLLECTION_NAME,
         embedding_function=embedding_func
     )
+
+    # Show DB status in sidebar caption for debugging
+    _db_count = collection.count()
+    _db_cols   = existing_collections
 
     # ── YouTube transcript API instance (>= 0.6.0 instance-based) ────────────
     ytt_api = YouTubeTranscriptApi()
@@ -503,8 +517,11 @@ with streamlit_analytics.track(
                 st.success(f"📚 {doc_count:,} passages indexed")
             else:
                 st.warning("📚 Book DB is empty")
-        except Exception:
-            pass
+                st.caption(f"Collections found: {_db_cols}")
+                st.caption(f"DB path: {DB_FOLDER}")
+                st.caption(f"chroma.sqlite3 exists: {(DB_FOLDER / 'chroma.sqlite3').exists()}")
+        except Exception as e:
+            st.warning(f"📚 DB error: {e}")
 
         if st.button("🗑️ Clear Chat History"):
             st.session_state.messages     = []
