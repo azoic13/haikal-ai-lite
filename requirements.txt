@@ -8,3 +8,4 @@ fpdf
 arabic-reshaper
 python-bidi
 gdown
+protobuf==3.20.3
