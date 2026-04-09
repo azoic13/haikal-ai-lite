@@ -95,35 +95,58 @@ def create_pdf(question, answer):
     return pdf.output()
 
 def get_data(query, search_mode):
+    """Search only the provided database and specified YouTube channels."""
     pdf_context, pdf_sources = "", []
     yt_context, yt_sources = "", [] 
-    CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]
+    CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]  # Only these channels
 
+    # Search local database only
     if search_mode in ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Hybrid (Both)"]:
         try:
             results = collection.query(query_texts=[query], n_results=3)
-            if results['documents'] and results['documents']:
-                for d, m in zip(results['documents'], results['metadatas']):
-                    s_name = m.get('source', 'Unknown Book')
-                    pdf_sources.append(s_name)
-                    pdf_context += f"\n[BOOK SOURCE: {s_name}]\n{d}\n"
+            # Safely handle results
+            if results and results.get('documents') and len(results['documents']) > 0:
+                for doc_list, meta_list in zip(results['documents'], results['metadatas']):
+                    for d, m in zip(doc_list, meta_list):
+                        s_name = m.get('source', 'Unknown Book')
+                        if s_name not in pdf_sources:  # Avoid duplicates
+                            pdf_sources.append(s_name)
+                        pdf_context += f"\n[BOOK SOURCE: {s_name}]\n{d}\n"
+        except ValueError:
+            # No results found in database - this is normal
+            pass
         except Exception as e: 
-            print(f"DB Query Error: {e}")
+            st.warning(f"Database query error: {e}")
 
+    # Search only specified YouTube channels
     if search_mode in ["Ask Mostafa Al-Adawi", "Hybrid (Both)"]:
         for handle in CHANNELS:
             try:
+                # Search with channel filter
                 search = VideosSearch(f"{query} {handle}", limit=2)
                 res = search.result().get('result', [])
+                
                 for v in res:
+                    # Verify video is from the correct channel
+                    channel_name = v.get('channel', {}).get('name', '').lower()
+                    if handle.lower().strip('@') not in channel_name.lower():
+                        continue  # Skip if not from the specified channel
+                    
                     try:
                         t = YouTubeTranscriptApi.get_transcript(v['id'], languages=['ar', 'en'])
                         v_title = str(v['title'])
                         v_link = str(v['link'])
-                        yt_sources.append({"title": v_title, "link": v_link})
-                        yt_context += f"\n[VIDEO SOURCE: {v_title}]\nLink: {v_link}\nTranscript: {' '.join([x['text'] for x in t])[:2000]}\n"
-                    except: continue
-            except Exception: continue
+                        
+                        # Avoid duplicate videos
+                        if not any(vid['link'] == v_link for vid in yt_sources):
+                            yt_sources.append({"title": v_title, "link": v_link})
+                            yt_context += f"\n[VIDEO SOURCE: {v_title}]\nLink: {v_link}\nTranscript: {' '.join([x['text'] for x in t])[:2000]}\n"
+                    except Exception:
+                        # Video might not have transcript, skip it
+                        continue
+            except Exception as e:
+                # Channel search might fail, continue with next channel
+                continue
                 
     return pdf_context + yt_context, pdf_sources, yt_sources
 
@@ -176,7 +199,7 @@ if prompt := st.chat_input("Ask a question..."):
             )
             
             response = client_gemini.models.generate_content(
-                model="gemini-3-flash-preview",
+                model="gemini-2.0-flash",
                 contents=f"{instruction}\n\nCONTEXT:\n{context}\n\nQ: {prompt}"
             )
             
