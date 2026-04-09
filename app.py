@@ -99,7 +99,7 @@ def get_data(query, search_mode):
     yt_context, yt_sources = "", [] 
     CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]
 
-    if search_mode in ["Search Local Books Only", "Hybrid (Both)"]:
+    if search_mode in ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Hybrid (Both)"]:
         try:
             results = collection.query(query_texts=[query], n_results=3)
             if results['documents'] and results['documents']:
