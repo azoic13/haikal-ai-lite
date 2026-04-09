@@ -110,7 +110,7 @@ def get_data(query, search_mode):
         except Exception as e: 
             print(f"DB Query Error: {e}")
 
-    if search_mode in ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Hybrid (Both)"]:
+    if search_mode in ["Ask Mostafa Al-Adawi", "Hybrid (Both)"]:
         for handle in CHANNELS:
             try:
                 search = VideosSearch(f"{query} {handle}", limit=2)
@@ -130,7 +130,7 @@ def get_data(query, search_mode):
 # --- 4. SIDEBAR (Static placement) ---
 with st.sidebar:
     st.title("⚙️ Control Room")
-    mode = st.radio("Search Mode:", ["Search Hadith Books (كتب الاحاديث و التفسير) OnlySearch Local Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
+    mode = st.radio("Search Mode:", ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
     
     if st.button("🗑️ Clear Chat History"):
         st.session_state.messages = []
@@ -184,9 +184,34 @@ if prompt := st.chat_input("Ask a question..."):
             st.markdown(answer_text)
             st.session_state.messages.append({"role": "assistant", "content": answer_text})
             
+            # Display Sources Used
+            st.divider()
+            st.subheader("📚 Sources Used:")
+            
+            sources_found = False
+            
+            # Display Book Sources
+            if pdfs:
+                sources_found = True
+                st.write("**📖 Hadith Books:**")
+                for book in pdfs:
+                    st.markdown(f"• {book}")
+            
+            # Display YouTube Video Sources
+            if vids:
+                sources_found = True
+                st.write("**🎥 YouTube Videos:**")
+                for video in vids:
+                    st.markdown(f"• [{video['title']}]({video['link']})")
+            
+            if not sources_found:
+                st.info("ℹ️ No external sources were consulted for this response.")
+            
+            st.divider()
+            
+            # PDF Download Button
             try:
                 pdf_bytes = create_pdf(prompt, answer_text)
                 st.download_button(label="📥 Save PDF", data=pdf_bytes, file_name="Report.pdf", mime="application/pdf")
-            except: pass
-            
-            st.rerun()
+            except Exception as e:
+                st.warning(f"Could not generate PDF: {e}")
