@@ -110,7 +110,7 @@ def get_data(query, search_mode):
         except Exception as e: 
             print(f"DB Query Error: {e}")
 
-    if search_mode in ["Ask Mostafa Al-Adawi", "Hybrid (Both)"]:
+    if search_mode in ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Hybrid (Both)"]:
         for handle in CHANNELS:
             try:
                 search = VideosSearch(f"{query} {handle}", limit=2)
@@ -130,7 +130,7 @@ def get_data(query, search_mode):
 # --- 4. SIDEBAR (Static placement) ---
 with st.sidebar:
     st.title("⚙️ Control Room")
-    mode = st.radio("Search Mode:", ["Search Local Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
+    mode = st.radio("Search Mode:", ["Search Hadith Books (كتب الاحاديث و التفسير) OnlySearch Local Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
     
     if st.button("🗑️ Clear Chat History"):
         st.session_state.messages = []
@@ -150,7 +150,7 @@ with st.sidebar:
             st.markdown(f"🎥 [{v['title']}]({v['link']})")
 
 # --- 5. MAIN CHAT INTERFACE ---
-st.title("🕌 Al-Adawi Scholarly Assistant")
+st.title("🕌 Sharee'a AI (شريعة")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
