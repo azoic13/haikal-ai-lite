@@ -198,43 +198,59 @@ if prompt := st.chat_input("Ask a question..."):
                 "3. Respond in the user's language."
             )
             
-            response = client_gemini.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=f"{instruction}\n\nCONTEXT:\n{context}\n\nQ: {prompt}"
-            )
-            
-            answer_text = response.text
-            st.markdown(answer_text)
-            st.session_state.messages.append({"role": "assistant", "content": answer_text})
-            
-            # Display Sources Used
-            st.divider()
-            st.subheader("📚 Sources Used:")
-            
-            sources_found = False
-            
-            # Display Book Sources
-            if pdfs:
-                sources_found = True
-                st.write("**📖 Hadith Books:**")
-                for book in pdfs:
-                    st.markdown(f"• {book}")
-            
-            # Display YouTube Video Sources
-            if vids:
-                sources_found = True
-                st.write("**🎥 YouTube Videos:**")
-                for video in vids:
-                    st.markdown(f"• [{video['title']}]({video['link']})")
-            
-            if not sources_found:
-                st.info("ℹ️ No external sources were consulted for this response.")
-            
-            st.divider()
-            
-            # PDF Download Button
             try:
-                pdf_bytes = create_pdf(prompt, answer_text)
-                st.download_button(label="📥 Save PDF", data=pdf_bytes, file_name="Report.pdf", mime="application/pdf")
-            except Exception as e:
-                st.warning(f"Could not generate PDF: {e}")
+                # Truncate context if it's too long
+                max_context_length = 8000
+                if len(context) > max_context_length:
+                    context = context[:max_context_length] + "\n...[context truncated]"
+                
+                response = client_gemini.models.generate_content(
+                    model="gemini-1.5-flash",  # Use stable, proven model
+                    contents=f"{instruction}\n\nCONTEXT:\n{context}\n\nQ: {prompt}"
+                )
+                
+                answer_text = response.text
+                st.markdown(answer_text)
+                st.session_state.messages.append({"role": "assistant", "content": answer_text})
+                
+                # Display Sources Used
+                st.divider()
+                st.subheader("📚 Sources Used:")
+                
+                sources_found = False
+                
+                # Display Book Sources
+                if pdfs:
+                    sources_found = True
+                    st.write("**📖 Hadith Books:**")
+                    for book in pdfs:
+                        st.markdown(f"• {book}")
+                
+                # Display YouTube Video Sources
+                if vids:
+                    sources_found = True
+                    st.write("**🎥 YouTube Videos:**")
+                    for video in vids:
+                        st.markdown(f"• [{video['title']}]({video['link']})")
+                
+                if not sources_found:
+                    st.info("ℹ️ No external sources were consulted for this response.")
+                
+                st.divider()
+                
+                # PDF Download Button
+                try:
+                    pdf_bytes = create_pdf(prompt, answer_text)
+                    st.download_button(label="📥 Save PDF", data=pdf_bytes, file_name="Report.pdf", mime="application/pdf")
+                except Exception as e:
+                    st.warning(f"Could not generate PDF: {e}")
+                    
+            except Exception as api_error:
+                st.error(f"❌ Error generating response: {str(api_error)}")
+                st.info(
+                    "**Troubleshooting tips:**\n"
+                    "1. Verify your GEMINI_API_KEY is valid in Streamlit secrets\n"
+                    "2. Check that your API has sufficient quota\n"
+                    "3. Try a simpler query with fewer special characters\n"
+                    "4. Make sure the API key has Generative AI access enabled"
+                )
