@@ -1,14 +1,10 @@
 streamlit
-streamlit-analytics2
 chromadb
 sentence-transformers
-yt-dlp
+youtube-search-python
 youtube-transcript-api
-anthropic
-groq
 google-genai
-fpdf2
+fpdf
 arabic-reshaper
 python-bidi
-pysqlite3-binary
 gdown
