@@ -95,65 +95,42 @@ def create_pdf(question, answer):
     return pdf.output()
 
 def get_data(query, search_mode):
-    """Search only the provided database and specified YouTube channels."""
     pdf_context, pdf_sources = "", []
     yt_context, yt_sources = "", [] 
-    CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]  # Only these channels
+    CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]
 
-    # Search local database only
-    if search_mode in ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Hybrid (Both)"]:
+    if search_mode in ["Search Local Books Only", "Hybrid (Both)"]:
         try:
             results = collection.query(query_texts=[query], n_results=3)
-            # Safely handle results
-            if results and results.get('documents') and len(results['documents']) > 0:
-                for doc_list, meta_list in zip(results['documents'], results['metadatas']):
-                    for d, m in zip(doc_list, meta_list):
-                        s_name = m.get('source', 'Unknown Book')
-                        if s_name not in pdf_sources:  # Avoid duplicates
-                            pdf_sources.append(s_name)
-                        pdf_context += f"\n[BOOK SOURCE: {s_name}]\n{d}\n"
-        except ValueError:
-            # No results found in database - this is normal
-            pass
+            if results['documents'] and results['documents']:
+                for d, m in zip(results['documents'], results['metadatas']):
+                    s_name = m.get('source', 'Unknown Book')
+                    pdf_sources.append(s_name)
+                    pdf_context += f"\n[BOOK SOURCE: {s_name}]\n{d}\n"
         except Exception as e: 
-            st.warning(f"Database query error: {e}")
+            print(f"DB Query Error: {e}")
 
-    # Search only specified YouTube channels
     if search_mode in ["Ask Mostafa Al-Adawi", "Hybrid (Both)"]:
         for handle in CHANNELS:
             try:
-                # Search with channel filter
                 search = VideosSearch(f"{query} {handle}", limit=2)
                 res = search.result().get('result', [])
-                
                 for v in res:
-                    # Verify video is from the correct channel
-                    channel_name = v.get('channel', {}).get('name', '').lower()
-                    if handle.lower().strip('@') not in channel_name.lower():
-                        continue  # Skip if not from the specified channel
-                    
                     try:
                         t = YouTubeTranscriptApi.get_transcript(v['id'], languages=['ar', 'en'])
                         v_title = str(v['title'])
                         v_link = str(v['link'])
-                        
-                        # Avoid duplicate videos
-                        if not any(vid['link'] == v_link for vid in yt_sources):
-                            yt_sources.append({"title": v_title, "link": v_link})
-                            yt_context += f"\n[VIDEO SOURCE: {v_title}]\nLink: {v_link}\nTranscript: {' '.join([x['text'] for x in t])[:2000]}\n"
-                    except Exception:
-                        # Video might not have transcript, skip it
-                        continue
-            except Exception as e:
-                # Channel search might fail, continue with next channel
-                continue
+                        yt_sources.append({"title": v_title, "link": v_link})
+                        yt_context += f"\n[VIDEO SOURCE: {v_title}]\nLink: {v_link}\nTranscript: {' '.join([x['text'] for x in t])[:2000]}\n"
+                    except: continue
+            except Exception: continue
                 
     return pdf_context + yt_context, pdf_sources, yt_sources
 
 # --- 4. SIDEBAR (Static placement) ---
 with st.sidebar:
     st.title("⚙️ Control Room")
-    mode = st.radio("Search Mode:", ["Search Hadith Books (كتب الاحاديث و التفسير) Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
+    mode = st.radio("Search Mode:", ["Search Local Books Only", "Ask Mostafa Al-Adawi", "Hybrid (Both)"], index=2)
     
     if st.button("🗑️ Clear Chat History"):
         st.session_state.messages = []
@@ -173,7 +150,7 @@ with st.sidebar:
             st.markdown(f"🎥 [{v['title']}]({v['link']})")
 
 # --- 5. MAIN CHAT INTERFACE ---
-st.title("🕌 Sharee'a AI (شريعة")
+st.title("🕌 Al-Adawi Scholarly Assistant")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -198,59 +175,19 @@ if prompt := st.chat_input("Ask a question..."):
                 "3. Respond in the user's language."
             )
             
+            response = client_gemini.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=f"{instruction}\n\nCONTEXT:\n{context}\n\nQ: {prompt}"
+            )
+            
+            answer_text = response.text
+            st.markdown(answer_text)
+            st.session_state.messages.append({"role": "assistant", "content": answer_text})
+            
             try:
-                # Truncate context if it's too long
-                max_context_length = 8000
-                if len(context) > max_context_length:
-                    context = context[:max_context_length] + "\n...[context truncated]"
-                
-                response = client_gemini.models.generate_content(
-                    model="gemini-1.5-flash",  # Use stable, proven model
-                    contents=f"{instruction}\n\nCONTEXT:\n{context}\n\nQ: {prompt}"
-                )
-                
-                answer_text = response.text
-                st.markdown(answer_text)
-                st.session_state.messages.append({"role": "assistant", "content": answer_text})
-                
-                # Display Sources Used
-                st.divider()
-                st.subheader("📚 Sources Used:")
-                
-                sources_found = False
-                
-                # Display Book Sources
-                if pdfs:
-                    sources_found = True
-                    st.write("**📖 Hadith Books:**")
-                    for book in pdfs:
-                        st.markdown(f"• {book}")
-                
-                # Display YouTube Video Sources
-                if vids:
-                    sources_found = True
-                    st.write("**🎥 YouTube Videos:**")
-                    for video in vids:
-                        st.markdown(f"• [{video['title']}]({video['link']})")
-                
-                if not sources_found:
-                    st.info("ℹ️ No external sources were consulted for this response.")
-                
-                st.divider()
-                
-                # PDF Download Button
-                try:
-                    pdf_bytes = create_pdf(prompt, answer_text)
-                    st.download_button(label="📥 Save PDF", data=pdf_bytes, file_name="Report.pdf", mime="application/pdf")
-                except Exception as e:
-                    st.warning(f"Could not generate PDF: {e}")
-                    
-            except Exception as api_error:
-                st.error(f"❌ Error generating response: {str(api_error)}")
-                st.info(
-                    "**Troubleshooting tips:**\n"
-                    "1. Verify your GEMINI_API_KEY is valid in Streamlit secrets\n"
-                    "2. Check that your API has sufficient quota\n"
-                    "3. Try a simpler query with fewer special characters\n"
-                    "4. Make sure the API key has Generative AI access enabled"
-                )
+                pdf_bytes = create_pdf(prompt, answer_text)
+                st.download_button(label="📥 Save PDF", data=pdf_bytes, file_name="Report.pdf", mime="application/pdf")
+            except: pass
+            
+            st.rerun()
+            
