@@ -14,7 +14,6 @@ import gdown
 # --- 1. INITIAL SETUP & SECURITY ---
 st.set_page_config(page_title="Sharee'a شريعة AI", page_icon="🕌", layout="wide")
 
-# Secure API Key loading
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except KeyError:
@@ -23,7 +22,6 @@ except KeyError:
 
 client_gemini = genai.Client(api_key=API_KEY)
 
-# Initialize Session State
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_pdfs" not in st.session_state:
@@ -34,7 +32,6 @@ if "current_vids" not in st.session_state:
 # --- 2. DATABASE DOWNLOAD & SETUP ---
 @st.cache_resource
 def setup_database():
-    """Downloads the DB from Google Drive (if needed) and initializes ChromaDB."""
     db_path = "./my_db"
     zip_path = "my_db.zip"
     
@@ -62,7 +59,6 @@ def setup_database():
 collection = setup_database()
 
 # --- 3. CORE FUNCTIONS ---
-
 def fix_arabic_for_pdf(text):
     if not text: return ""
     reshaped_text = arabic_reshaper.reshape(text)
@@ -86,22 +82,19 @@ def get_data(query, search_mode):
     yt_context, yt_sources = "", [] 
     CHANNELS = ["@ftawamostafaaladwy", "@fatawa_eladawy"]
 
-    # Fixed the condition string to match the radio button exactly
     if search_mode in ["Search Hadith and Tafsir Books حديث و تفسير Only", "Hybrid (Both)"]:
         try:
-            results = collection.query(query_texts=[query], n_results=3)
+            # INCREASED to 5 results to give the AI more context to work with
+            results = collection.query(query_texts=[query], n_results=5)
             if results['documents'] and results['documents']:
                 for d, m in zip(results['documents'], results['metadatas']):
                     s_name = m.get('source', 'Unknown Book')
-                    # Attempt to get the page number from metadata
                     s_page = m.get('page', 'Unknown Page') 
-                    
                     source_label = f"{s_name} (Page: {s_page})"
                     pdf_sources.append(source_label)
-                    # Pass the book name AND page number to the LLM context
                     pdf_context += f"\n[BOOK SOURCE: {s_name} | PAGE: {s_page}]\n{d}\n"
         except Exception as e: 
-            print(f"DB Query Error: {e}")
+            st.sidebar.error(f"DB Error: {e}") # Added visible error catching
 
     if search_mode in ["Ask Mostafa Al-Adawi", "Hybrid (Both)"]:
         for handle in CHANNELS:
@@ -114,12 +107,11 @@ def get_data(query, search_mode):
                         v_title = str(v['title'])
                         v_link = str(v['link'])
                         yt_sources.append({"title": v_title, "link": v_link})
-                        # Pass the video title AND link to the LLM context
                         yt_context += f"\n[VIDEO SOURCE: {v_title} | LINK: {v_link}]\nTranscript: {' '.join([x['text'] for x in t])[:2000]}\n"
                     except: continue
             except Exception: continue
                 
-    return pdf_context + yt_context, pdf_sources, yt_sources
+    return pdf_context, yt_context, pdf_sources, yt_sources
 
 # --- 4. SIDEBAR ---
 with st.sidebar:
@@ -140,7 +132,9 @@ with st.sidebar:
             st.write(f"📖 {p}")
             
     if st.session_state.current_vids:
-        for v in st.session_state.current_vids:
+        # Make sure we only show unique videos in the sidebar
+        unique_vids = {v['link']: v for v in st.session_state.current_vids}.values()
+        for v in unique_vids:
             st.markdown(f"🎥 [{v['title']}]({v['link']})")
 
 # --- 5. MAIN CHAT INTERFACE ---
@@ -157,27 +151,33 @@ if prompt := st.chat_input("Ask a question..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Searching sources..."):
-            context, pdfs, vids = get_data(prompt, mode)
+            pdf_ctx, yt_ctx, pdfs, vids = get_data(prompt, mode)
             
             st.session_state.current_pdfs = pdfs
             st.session_state.current_vids = vids
             
-            # --- STRICT OPTIMIZED INSTRUCTIONS ---
+            combined_context = pdf_ctx + yt_ctx
+            
+            # --- DEBUG WINDOW (Click to expand) ---
+            with st.expander("🔍 Debug: View Raw Search Results"):
+                st.write("**Books Found:**", pdf_ctx if pdf_ctx else "None")
+                st.write("**Videos Found:**", yt_ctx if yt_ctx else "None")
+            
+            # Slightly relaxed instruction to prevent "I don't know" loops
             instruction = (
                 "You are an expert assistant for Sheikh Mostafa Al-Adawi. "
                 "CRITICAL RULES:\n"
-                "1. STRICTLY use ONLY the information provided in the CONTEXT below. Do not use outside knowledge. "
-                "If the CONTEXT does not contain the answer, reply exactly with: 'I cannot find the answer in the provided sources.'\n"
-                "2. Provide a Confidence Score (0-100%) based on how well the context answers the question.\n"
+                "1. Base your answer on the CONTEXT below. If the exact answer isn't there, provide the closest relevant information from the context.\n"
+                "2. Provide a Confidence Score (0-100%).\n"
                 "3. You MUST list the exact sources used at the end of your response:\n"
-                "   - For Books: List the Book Name and Page Number exactly as provided in the context.\n"
-                "   - For Videos: List the Video Title and include the clickable Video Link provided in the context.\n"
+                "   - For Books: List the Book Name and Page Number.\n"
+                "   - For Videos: List the Video Title and include the clickable Video Link.\n"
                 "4. Respond naturally in the user's language."
             )
             
             response = client_gemini.models.generate_content(
                 model="gemini-3-flash-preview",
-                contents=f"{instruction}\n\nCONTEXT:\n{context}\n\nQ: {prompt}"
+                contents=f"{instruction}\n\nCONTEXT:\n{combined_context}\n\nQ: {prompt}"
             )
             
             answer_text = response.text
